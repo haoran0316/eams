@@ -9,6 +9,7 @@ import com.eams.context.BaseContext;
 import com.eams.dto.AssetApplicationAuditDTO;
 import com.eams.dto.AssetApplicationDTO;
 import com.eams.dto.AssetApplicationPageQueryDTO;
+import com.eams.dto.AuditEvent;
 import com.eams.entity.Asset;
 import com.eams.entity.AssetApplication;
 import com.eams.entity.Employee;
@@ -21,6 +22,7 @@ import com.eams.service.AssetApplicationService;
 import com.eams.vo.AssetApplicationVO;
 import com.eams.websocket.WebSocketServer;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -44,6 +46,9 @@ public class AssetApplicationServiceImpl implements AssetApplicationService {
 
     @Autowired
     private WebSocketServer webSocketServer;
+
+    @Autowired
+    private RabbitTemplate rabbitTemplate;
 
     /**
      * 员工提交资产申请：申请时资产须为在库状态
@@ -151,23 +156,22 @@ public class AssetApplicationServiceImpl implements AssetApplicationService {
         if (auditDTO.getStatus() == ApplicationStatusConstant.APPROVED) {
             application.setStatus(ApplicationStatusConstant.APPROVED);
             application.setRejectReason(null);
-            // 资产变为已领用
-            assetMapper.updateStatus(Asset.builder()
-                    .id(application.getAssetId())
-                    .status(AssetStatusConstant.USED)
-                    .build());
-            webSocketServer.sendToAllClient("申请已通过：" + application.getApplicationNo());
         } else if (auditDTO.getStatus() == ApplicationStatusConstant.REJECTED) {
             if (auditDTO.getRejectReason() == null || auditDTO.getRejectReason().isEmpty()) {
                 throw new BaseException("拒绝时必须填写拒绝原因");
             }
             application.setStatus(ApplicationStatusConstant.REJECTED);
             application.setRejectReason(auditDTO.getRejectReason());
-            webSocketServer.sendToAllClient("申请已被拒绝：" + application.getApplicationNo());
         } else {
             throw new BaseException(MessageConstant.APPLICATION_STATUS_ERROR);
         }
         assetApplicationMapper.update(application);
+
+        // 异步处理资产状态更新 + WebSocket 通知
+        rabbitTemplate.convertAndSend("asset.exchange", "application.audited",
+                new AuditEvent(application.getId(), application.getApplicationNo(),
+                        application.getAssetId(), application.getStatus(),
+                        approverId, now, application.getRejectReason(), "audit"));
     }
 
     /**
@@ -188,14 +192,10 @@ public class AssetApplicationServiceImpl implements AssetApplicationService {
         application.setUpdateTime(LocalDateTime.now());
         assetApplicationMapper.update(application);
 
-        // 资产归还：已领用 → 在库
-        Asset asset = assetMapper.getById(application.getAssetId());
-        if (asset != null && asset.getStatus() == AssetStatusConstant.USED) {
-            assetMapper.updateStatus(Asset.builder()
-                    .id(asset.getId())
-                    .status(AssetStatusConstant.IN_STOCK)
-                    .build());
-        }
-        webSocketServer.sendToAllClient("申请单已完成：" + application.getApplicationNo());
+        // 异步处理资产归还 + WebSocket 通知
+        rabbitTemplate.convertAndSend("asset.exchange", "application.audited",
+                new AuditEvent(application.getId(), application.getApplicationNo(),
+                        application.getAssetId(), application.getStatus(),
+                        null, LocalDateTime.now(), null, "complete"));
     }
 }

@@ -18,6 +18,13 @@ spring:
       port: ${eams.redis.port}
       password: ${eams.redis.password}
       database: ${eams.redis.database}
+
+  rabbitmq:
+    host: ${eams.rabbitmq.host}
+    port: ${eams.rabbitmq.port}
+    virtual-host: ${eams.rabbitmq.virtual-host}
+    username: ${eams.rabbitmq.username}
+    password: ${eams.rabbitmq.password}
   ai:
     openai:
       # OpenAI 兼容接口配置（DeepSeek / Ollama / 通义千问等），可通过环境变量覆盖：
@@ -29,6 +36,10 @@ spring:
       chat:
         model: ${eams.openai.chat.model}
         temperature: 0.2
+      # 模型调用超时控制：连接超时 + 读取超时，避免请求一直挂起
+      timeout:
+        connect: 5s
+        read: 10s
 
 mybatis:
   #mapper配置文件

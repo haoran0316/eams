@@ -18,6 +18,7 @@ import com.eams.mapper.RepairRecordMapper;
 import com.eams.result.PageResult;
 import com.eams.service.RepairService;
 import com.eams.vo.RepairRecordVO;
+import com.eams.validation.AssetStatusValidator;
 import com.eams.websocket.WebSocketServer;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -70,6 +71,9 @@ public class RepairServiceImpl implements RepairService {
         record.setUpdateTime(now);
         record.setCreateUser(BaseContext.getCurrentId());
         repairRecordMapper.insert(record);
+
+        // 校验状态流转合法性
+        AssetStatusValidator.validate(asset.getStatus(), AssetStatusConstant.REPAIRING);
 
         // 资产状态变维修中
         assetMapper.updateStatus(Asset.builder()
@@ -150,6 +154,9 @@ public class RepairServiceImpl implements RepairService {
         record.setRepairTime(now);
         record.setUpdateTime(now);
         repairRecordMapper.update(record);
+
+        // 校验状态流转合法性
+        AssetStatusValidator.validate(assetMapper.getById(record.getAssetId()).getStatus(), AssetStatusConstant.IN_STOCK);
 
         // 资产状态回在库
         assetMapper.updateStatus(Asset.builder()

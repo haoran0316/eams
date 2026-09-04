@@ -13,6 +13,7 @@ import com.eams.mapper.AssetCategoryMapper;
 import com.eams.mapper.AssetMapper;
 import com.eams.result.PageResult;
 import com.eams.service.AssetService;
+import com.eams.validation.AssetStatusValidator;
 import com.eams.vo.AssetVO;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
@@ -109,6 +110,10 @@ public class AssetServiceImpl implements AssetService {
      */
     @Override
     public void updateStatus(Long id, Integer status) {
+        Asset current = assetMapper.getById(id);
+        if (current != null) {
+            AssetStatusValidator.validate(current.getStatus(), status);
+        }
         Asset asset = Asset.builder()
                 .id(id)
                 .status(status)

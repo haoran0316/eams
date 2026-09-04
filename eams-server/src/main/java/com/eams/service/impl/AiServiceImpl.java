@@ -22,11 +22,18 @@ import org.springframework.util.MimeType;
 import org.springframework.util.MimeTypeUtils;
 
 import java.net.URI;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.StringJoiner;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.function.Supplier;
 
 /**
  * Spring AI 智能服务实现
@@ -35,6 +42,7 @@ import java.util.StringJoiner;
  * 1. 依赖 spring-ai-starter-model-openai（Spring AI 2.0），默认对接 OpenAI 兼容接口，
  *    可通过环境变量 SKY_AI_BASE_URL / SKY_AI_API_KEY / SKY_AI_MODEL 切换 DeepSeek、Ollama、通义千问等。
  * 2. 三个方法均做了异常兜底：模型不可用 / 未配置时返回友好提示，不影响其它业务接口。
+ * 3. 所有模型调用通过 CompletableFuture + 超时控制，避免线程长时间挂起。
  */
 @Service
 @Slf4j
@@ -45,6 +53,16 @@ public class AiServiceImpl implements AiService {
     private final EmployeeMapper employeeMapper;
     private final AssetCategoryMapper assetCategoryMapper;
     private final ObjectMapper objectMapper = new ObjectMapper();
+
+    /**
+     * 虚拟线程池：与 Tomcat 线程池隔离，AI 调用卡住不影响其他接口
+     */
+    private static final ExecutorService AI_EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
+
+    /**
+     * 单次模型调用的超时时间
+     */
+    private static final Duration AI_TIMEOUT = Duration.ofSeconds(5);
 
     public AiServiceImpl(ChatClient.Builder chatClientBuilder,
                          AssetMapper assetMapper,
@@ -93,11 +111,12 @@ public class AiServiceImpl implements AiService {
             prompt.append("申请数量：").append(application.getQuantity() == null ? "未填写" : application.getQuantity()).append("\n");
             prompt.append("申请原因：").append(nullToEmpty(application.getReason())).append("\n");
 
-            String content = chatClient.prompt()
-                    .user(prompt.toString())
-                    .call()
-                    .content();
+            String content = callWithTimeout(() ->
+                    chatClient.prompt().user(prompt.toString()).call().content());
             return content == null || content.isBlank() ? "模型未返回内容，请人工审批" : content.trim();
+        } catch (TimeoutException e) {
+            log.warn("智能审批建议超时, applicationId={}", application.getId());
+            return "AI 服务响应超时，请人工审批。";
         } catch (Exception e) {
             log.error("智能审批建议调用失败, applicationId={}", application.getId(), e);
             return "AI 服务暂不可用（请检查模型配置），请人工审批。";
@@ -139,10 +158,8 @@ public class AiServiceImpl implements AiService {
             prompt.append("用户查询：").append(keyword).append("\n");
             prompt.append("要求：只输出 JSON 对象，不要输出任何其他文字或解释。如果没有任何可提取条件，输出 {}");
 
-            String content = chatClient.prompt()
-                    .user(prompt.toString())
-                    .call()
-                    .content();
+            String content = callWithTimeout(() ->
+                    chatClient.prompt().user(prompt.toString()).call().content());
             JsonNode node = parseJson(content);  // 把模型输出的内容,转为纯 JSON 对象
             if (node == null || node.isEmpty()) {
                 return result;
@@ -170,6 +187,9 @@ public class AiServiceImpl implements AiService {
             PageHelper.startPage(dto.getPage(), dto.getPageSize());
             Page<AssetVO> page = assetMapper.pageQuery(dto);
             return page == null ? result : page.getResult();
+        } catch (TimeoutException e) {
+            log.warn("自然语言检索超时, keyword={}", keyword);
+            return result;
         } catch (Exception e) {
             log.error("自然语言检索失败, keyword={}", keyword, e);
             return result;
@@ -194,10 +214,11 @@ public class AiServiceImpl implements AiService {
                     + "- spec：规格型号（如无法判断则省略）\n"
                     + "- description：简短描述\n"
                     + "只输出 JSON，不要输出任何其他文字。";
-            String content = chatClient.prompt()
-                    .user(u -> u.text(prompt).media(new Media(mimeTypeOf(imageUrl), URI.create(imageUrl))))
-                    .call()
-                    .content();
+            String content = callWithTimeout(() ->
+                    chatClient.prompt()
+                            .user(u -> u.text(prompt).media(new Media(mimeTypeOf(imageUrl), URI.create(imageUrl))))
+                            .call()
+                            .content());
             JsonNode node = parseJson(content); // 把模型输出的内容,转为纯 JSON 对象
             if (node == null) {
                 result.put("error", "模型未返回有效识别结果");
@@ -210,11 +231,26 @@ public class AiServiceImpl implements AiService {
             result.put("description", textOrNull(node, "description"));
             result.put("imageUrl", imageUrl);
             return result;
+        } catch (TimeoutException e) {
+            log.warn("图片识别超时, imageUrl={}", imageUrl);
+            result.put("error", "AI 服务响应超时，请稍后重试");
+            return result;
         } catch (Exception e) {
             log.error("图片识别失败, imageUrl={}", imageUrl, e);
             result.put("error", "AI 服务暂不可用（请检查模型配置或图片地址）");
             return result;
         }
+    }
+
+    // ========== 超时控制 ==========
+
+    /**
+     * 在虚拟线程中异步调用模型，带超时控制。
+     * 超时抛出 TimeoutException，由各业务方法自行处理降级。
+     */
+    private String callWithTimeout(Supplier<String> task) throws Exception {
+        CompletableFuture<String> future = CompletableFuture.supplyAsync(task, AI_EXECUTOR);
+        return future.get(AI_TIMEOUT.toSeconds(), TimeUnit.SECONDS);
     }
 
     // ---------------- 私有工具方法 ----------------
@@ -229,16 +265,16 @@ public class AiServiceImpl implements AiService {
     }
 
     /**
-     * 从模型输出中提取 JSON 对象（兼容 ```json ... ``` 代码块及前后多余文字）
+     * 从模型输出中提取 JSON 对象（兼容 `json ... ` 代码块及前后多余文字）
      */
     private JsonNode parseJson(String content) {
         if (content == null || content.isBlank()) {
             return null;
         }
         String text = content.trim();
-        if (text.startsWith("```")) {
+        if (text.startsWith("`")) {
             int first = text.indexOf('\n');
-            int last = text.lastIndexOf("```");
+            int last = text.lastIndexOf("`");
             if (first >= 0 && last > first) {
                 text = text.substring(first + 1, last).trim();
             }

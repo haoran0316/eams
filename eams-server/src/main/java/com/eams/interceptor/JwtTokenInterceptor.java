@@ -1,6 +1,7 @@
 package com.eams.interceptor;
 
 import com.eams.constant.JwtClaimsConstant;
+import com.eams.service.impl.EmployeeServiceImpl;
 import com.eams.constant.RedisConstant;
 import com.eams.constant.RoleConstant;
 import com.eams.context.BaseContext;
@@ -32,6 +33,9 @@ public class JwtTokenInterceptor implements HandlerInterceptor {
     @Autowired
     private StringRedisTemplate stringRedisTemplate;
 
+    @Autowired
+    private EmployeeServiceImpl employeeService;
+
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) {
         // 放行非 Controller 方法（静态资源等）
@@ -49,10 +53,16 @@ public class JwtTokenInterceptor implements HandlerInterceptor {
             Claims claims = JwtUtil.parseJWT(jwtProperties.getSecretKey(), token);
             Long empId = Long.valueOf(claims.get(JwtClaimsConstant.EMP_ID).toString());
 
-            // 校验 Redis 登录态
-            String redisToken = stringRedisTemplate.opsForValue().get(RedisConstant.LOGIN_TOKEN_KEY + empId);
-            if (redisToken == null || !redisToken.equals(token)) {
-                log.warn("Redis 登录态不存在或已失效, empId={}", empId);
+            // 校验登录态（Redis -> 本地缓存 fallback）
+            String storedToken = null;
+            try {
+                storedToken = stringRedisTemplate.opsForValue().get(RedisConstant.LOGIN_TOKEN_KEY + empId);
+            } catch (Exception e) {
+                log.warn("Redis不可用，尝试本地缓存, empId={}", empId);
+                storedToken = employeeService.getLocalToken(empId);
+            }
+            if (storedToken == null || !storedToken.equals(token)) {
+                log.warn("登录态不存在或已失效, empId={}", empId);
                 response.setStatus(401);
                 return false;
             }

@@ -29,4 +29,5 @@ public class MessageConstant {
 
     public static final String REPAIR_NOT_FOUND = "报修记录不存在";
     public static final String PHONE_NOT_FOUND = "手机号未注册";
+    public static final String ASSET_STATUS_TRANSITION_INVALID = "资产状态流转不合法";
 }

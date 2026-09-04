@@ -34,6 +34,7 @@ import org.springframework.util.DigestUtils;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 @Service
@@ -48,6 +49,9 @@ public class EmployeeServiceImpl implements EmployeeService {
 
     @Autowired
     private StringRedisTemplate stringRedisTemplate;
+
+    /** Local token cache (Redis fallback) */
+    private final Map<Long, String> localTokenMap = new ConcurrentHashMap<>();
 
     /**
      * 员工登录：支持用户名（管理端）或手机号（H5 端）+ 密码
@@ -92,11 +96,16 @@ public class EmployeeServiceImpl implements EmployeeService {
         String token = JwtUtil.createJWT(jwtProperties.getSecretKey(), jwtProperties.getTtl(), claims);
 
         // 登录态写入 Redis，7 天过期
-        stringRedisTemplate.opsForValue().set(
-                RedisConstant.LOGIN_TOKEN_KEY + employee.getId(),
-                token,
-                RedisConstant.LOGIN_TOKEN_TTL,
-                TimeUnit.SECONDS);
+        try {
+            stringRedisTemplate.opsForValue().set(
+                    RedisConstant.LOGIN_TOKEN_KEY + employee.getId(),
+                    token,
+                    RedisConstant.LOGIN_TOKEN_TTL,
+                    TimeUnit.SECONDS);
+        } catch (Exception e) {
+            log.warn("Redis unavailable, using local cache: {}", e.getMessage());
+            localTokenMap.put(employee.getId(), token);
+        }
 
         return EmployeeLoginVO.builder()
                 .id(employee.getId())
@@ -116,7 +125,12 @@ public class EmployeeServiceImpl implements EmployeeService {
     public void logout() {
         Long currentId = BaseContext.getCurrentId();
         if (currentId != null) {
-            stringRedisTemplate.delete(RedisConstant.LOGIN_TOKEN_KEY + currentId);
+            try {
+                stringRedisTemplate.delete(RedisConstant.LOGIN_TOKEN_KEY + currentId);
+            } catch (Exception e) {
+                log.warn("Redis unavailable, clearing local cache");
+            }
+            localTokenMap.remove(currentId);
             log.info("员工退出登录, empId={}", currentId);
         }
         BaseContext.removeCurrentId();
@@ -205,5 +219,13 @@ public class EmployeeServiceImpl implements EmployeeService {
                 .password(DigestUtils.md5DigestAsHex(passwordEditDTO.getNewPassword().getBytes()))
                 .build();
         employeeMapper.update(update);
+    }
+
+    public String getLocalToken(Long empId) {
+        return localTokenMap.get(empId);
+    }
+
+    public Map<Long, String> getLocalTokenMap() {
+        return localTokenMap;
     }
 }
